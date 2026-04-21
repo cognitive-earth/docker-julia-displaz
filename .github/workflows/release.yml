@@ -1,5 +1,4 @@
-# .github/workflows/release.yml
-name: Reuse Node Release Workflow
+name: Node Release
 
 on:
   push:
@@ -8,9 +7,144 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  NODE_VERSION: 22.16.0
+  NPM_VERSION: 11.11.0
 
 jobs:
-  node-release:
-    uses: cognitive-earth/github-actions-workflows/.github/workflows/node-release.yml@master
-    secrets:
-      NPM_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN }}
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for package-lock.json
+        id: lockfile-check
+        run: |
+          if [ -f "package-lock.json" ]; then
+            echo "has_lock=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_lock=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node with optional cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: ${{ steps.lockfile-check.outputs.has_lock == 'true' && 'npm' || '' }}
+
+      - name: Pin npm version
+        run: |
+          npm install -g npm@${NPM_VERSION}
+          node --version
+          npm --version
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ steps.lockfile-check.outputs.has_lock }}" = "true" ]; then
+            echo "Using npm ci with caching"
+            npm ci
+          else
+            echo "Using npm install without caching"
+            npm install
+          fi
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || github.token }}
+
+      - name: Check if package has releaseConfig (browser test flag)
+        id: release-config-check
+        run: |
+          if node -e "console.log(!!require('./package.json').releaseConfig)" | grep true; then
+            echo "has_browser_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_browser_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if tests should run
+        id: test-check
+        run: |
+          if [ "$(node -p "require('./package.json').ci?.runTests ?? false")" = "true" ]; then
+            echo "run_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Playwright Browsers
+        if: steps.release-config-check.outputs.has_browser_tests == 'true' && steps.test-check.outputs.run_tests == 'true'
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Setup Playwright Browsers
+        if: steps.release-config-check.outputs.has_browser_tests == 'true' && steps.test-check.outputs.run_tests == 'true'
+        uses: microsoft/playwright-github-action@v1
+
+      - name: Run tests
+        if: steps.release-config-check.outputs.has_browser_tests == 'true' && steps.test-check.outputs.run_tests == 'true'
+        run: npm test
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || github.token }}
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG_NAME" == *-* ]]; then
+            gh release create "$TAG_NAME" \
+              --title "Pre-release $TAG_NAME" \
+              --prerelease \
+              --notes ""
+          else
+            gh release create "$TAG_NAME" \
+              --title "Release $TAG_NAME" \
+              --notes ""
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  publish:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node for publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com/
+
+      - name: Pin npm version for publish
+        run: |
+          npm install -g npm@${NPM_VERSION}
+          node --version
+          npm --version
+
+      - name: Install dependencies (publish step)
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || github.token }}
+
+      - name: Publish Package
+        run: npm publish
+        env:
+          GITHUB_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTH_TOKEN || github.token }}
