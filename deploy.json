@@ -3,7 +3,7 @@
   "kind": "cognitive-earth.deploy.v1",
   "type": "docker",
   "source": {
-    "localRepoPath": "/home/jbangay/cognitiveEarth/docker-julia-displaz"
+    "localRepoPath": "."
   },
   "docker": {
     "repoName": "julia-displaz",
